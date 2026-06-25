@@ -46,12 +46,143 @@
       <h2>核心代码展示</h2>
 
       <pre><code class="language-js">
-function playDemo() {
-  const video = document.querySelector("video");
-  video.play();
+void handleControl() {
+  String command = server.arg("cmd");
+  manualControlMode = true;
+  currentDirection = command;
+  
+  // 执行控制命令
+  if (command == "FORWARD") {
+    carForward();
+    Serial.println("Manual: FORWARD");
+  } else if (command == "BACKWARD") {
+    // 需要添加后退函数
+    carBackward();
+    Serial.println("Manual: BACKWARD");
+  } else if (command == "LEFT") {
+    carTurnLeft();
+    Serial.println("Manual: LEFT");
+  } else if (command == "RIGHT") {
+    carTurnRight();
+    Serial.println("Manual: RIGHT");
+  } else if (command == "STOP") {
+    carStop();
+    Serial.println("Manual: STOP");
+  }
+  
+  server.send(200, "text/plain", "OK");
 }
 
-console.log("Hello GitHub Pages!");
+void handleStatus() {
+  if (manualControlMode) {
+    server.send(200, "text/plain", "MANUAL");
+  } else {
+    server.send(200, "text/plain", currentDirection);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  QMI8658_Init();
+
+  // --- 新增：初始化电机 ---
+  motorInit();
+
+  // 初始化LCD（保持不变）
+  gfx->begin();
+  pinMode(LCD_BL, OUTPUT);
+  digitalWrite(LCD_BL, HIGH);
+  
+  gfx->draw16bitRGBBitmap(0, 0, expression_images[current_state_index], 240, 240);
+  last_activity_time = millis();
+
+  // 设置WiFi和Web服务器
+  setupWiFi();
+  setupWebServer();
+
+  // 打印测试提示
+  Serial.println("System ready!");
+  Serial.println("Shake to change expression.");
+  Serial.println("Send 'test' via Serial to start motor test.");
+  Serial.println("Web control available at http://" + WiFi.localIP().toString());
+}
+
+void loop() {
+  // 处理Web客户端请求
+  server.handleClient();
+
+  // --- 新增：串口触发车轮测试（手动模式） ---
+  if (Serial.available() > 0) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd == "test") {
+      Serial.println("Manual motor test triggered!");
+      manualControlMode = false; // 退出手动模式
+      autoMotorTest(); // 启动自动测试
+      last_activity_time = millis(); // 重置无操作计时器
+      inactivity_blink_counter = 0;
+    }
+  }
+
+  if (is_moving && (millis() - movement_start_time >= MOVEMENT_DISPLAY_DELAY)) {
+    // 小车移动中且超过延迟时间，显示开心表情
+    gfx->draw16bitRGBBitmap(0, 0, image_data_happy, 240, 240);
+  }
+
+  if(!manualControlMode){
+    // --- 姿态检测和表情逻辑 ---
+  float accelX = QMI8658_get_A_fx();
+  float accelY = QMI8658_get_A_fy();
+  float accelZ = QMI8658_get_A_fz();
+  float magnitude = sqrt(accelX * accelX + accelY * accelY + accelZ * accelZ);
+  bool is_shaking_now = (magnitude > SHAKE_THRESHOLD);
+
+  if (is_shaking_now) {
+    if (shake_start_time == 0) {
+      shake_start_time = millis();
+    }
+
+    if (!trigger_locked && (millis() - shake_start_time >= SHAKE_DURATION_MS)) {
+      current_state_index++;
+
+      if (current_state_index < NUM_EXPRESSIONS) {
+        if (expression_images[current_state_index] == image_data_happy) {
+          gfx->draw16bitRGBBitmap(0, 0, image_data_happy, 240, 240);
+          delay(1500);
+          play_blink_animation_custom(2, image_data_eye);
+          current_state_index = 0;
+          gfx->draw16bitRGBBitmap(0, 0, image_data_eye, 240, 240);
+        } else {
+          gfx->draw16bitRGBBitmap(0, 0, expression_images[current_state_index], 240, 240);
+        }
+      } else {
+        play_blink_animation();
+        current_state_index = 0;
+        gfx->draw16bitRGBBitmap(0, 0, expression_images[current_state_index], 240, 240);
+      }
+
+      last_activity_time = millis();
+      inactivity_blink_counter = 0;
+      trigger_locked = true;
+    }
+  } else {
+    shake_start_time = 0;
+    trigger_locked = false;
+
+    if (millis() - last_activity_time > INACTIVITY_TIMEOUT_MS) {
+      inactivity_blink_counter++;
+      if (inactivity_blink_counter >= SPEECHLESS_THRESHOLD) {
+        gfx->draw16bitRGBBitmap(0, 0, image_data_speechless, 240, 240);
+      } else {
+        play_blink_animation();
+      }
+      last_activity_time = millis();
+    }
+  }
+}
+
+  delay(100);
+}
       </code></pre>
     </section>
 
@@ -66,7 +197,7 @@ console.log("Hello GitHub Pages!");
   </main>
 
   <footer>
-    <p>© 2026 我的项目</p>
+    <p>© 2026 cyrene-miniboom</p>
   </footer>
 
   <script src="main.js"></script>
