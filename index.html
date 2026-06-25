@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>esp32小车</title>
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- 代码高亮，可选 -->
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"
+  />
+</head>
+<body>
+  <header class="hero">
+    <h1>esp32小车</h1>
+    <p>由esp32控制的小车，能够在手机控制下移动，同时变更表情</p>
+
+    <div class="actions">
+      <a href="https://github.com/cyrene-miniboom/esp32-car" target="_blank">
+        查看 GitHub
+      </a>
+      <a href="#demo">
+        查看演示
+      </a>
+    </div>
+  </header>
+
+  <main>
+    <section id="demo" class="card">
+      <h2>项目演示视频</h2>
+
+      <video
+        controls
+        preload="metadata"
+        poster="video/屏幕截图 2026-06-20 170309.png"
+        width="100%"
+      >
+        <source src="video/e52a66ea16f138e7de184bc0e08c83ff.mp4" type="video/mp4" />
+        你的浏览器不支持 video 标签。
+      </video>
+    </section>
+
+    <section class="card">
+      <h2>核心代码展示</h2>
+
+      <pre><code class="language-js">
+void handleControl() {
+  String command = server.arg("cmd");
+  manualControlMode = true;
+  currentDirection = command;
+  
+  // 执行控制命令
+  if (command == "FORWARD") {
+    carForward();
+    Serial.println("Manual: FORWARD");
+  } else if (command == "BACKWARD") {
+    // 需要添加后退函数
+    carBackward();
+    Serial.println("Manual: BACKWARD");
+  } else if (command == "LEFT") {
+    carTurnLeft();
+    Serial.println("Manual: LEFT");
+  } else if (command == "RIGHT") {
+    carTurnRight();
+    Serial.println("Manual: RIGHT");
+  } else if (command == "STOP") {
+    carStop();
+    Serial.println("Manual: STOP");
+  }
+  
+  server.send(200, "text/plain", "OK");
+}
+
+void handleStatus() {
+  if (manualControlMode) {
+    server.send(200, "text/plain", "MANUAL");
+  } else {
+    server.send(200, "text/plain", currentDirection);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  QMI8658_Init();
+
+  // --- 新增：初始化电机 ---
+  motorInit();
+
+  // 初始化LCD（保持不变）
+  gfx->begin();
+  pinMode(LCD_BL, OUTPUT);
+  digitalWrite(LCD_BL, HIGH);
+  
+  gfx->draw16bitRGBBitmap(0, 0, expression_images[current_state_index], 240, 240);
+  last_activity_time = millis();
+
+  // 设置WiFi和Web服务器
+  setupWiFi();
+  setupWebServer();
+
+  // 打印测试提示
+  Serial.println("System ready!");
+  Serial.println("Shake to change expression.");
+  Serial.println("Send 'test' via Serial to start motor test.");
+  Serial.println("Web control available at http://" + WiFi.localIP().toString());
+}
+
+void loop() {
+  // 处理Web客户端请求
+  server.handleClient();
+
+  // --- 新增：串口触发车轮测试（手动模式） ---
+  if (Serial.available() > 0) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd == "test") {
+      Serial.println("Manual motor test triggered!");
+      manualControlMode = false; // 退出手动模式
+      autoMotorTest(); // 启动自动测试
+      last_activity_time = millis(); // 重置无操作计时器
+      inactivity_blink_counter = 0;
+    }
+  }
+
+  if (is_moving && (millis() - movement_start_time >= MOVEMENT_DISPLAY_DELAY)) {
+    // 小车移动中且超过延迟时间，显示开心表情
+    gfx->draw16bitRGBBitmap(0, 0, image_data_happy, 240, 240);
+  }
+
+  if(!manualControlMode){
+    // --- 姿态检测和表情逻辑 ---
+  float accelX = QMI8658_get_A_fx();
+  float accelY = QMI8658_get_A_fy();
+  float accelZ = QMI8658_get_A_fz();
+  float magnitude = sqrt(accelX * accelX + accelY * accelY + accelZ * accelZ);
+  bool is_shaking_now = (magnitude > SHAKE_THRESHOLD);
+
+  if (is_shaking_now) {
+    if (shake_start_time == 0) {
+      shake_start_time = millis();
+    }
+
+    if (!trigger_locked && (millis() - shake_start_time >= SHAKE_DURATION_MS)) {
+      current_state_index++;
+
+      if (current_state_index < NUM_EXPRESSIONS) {
+        if (expression_images[current_state_index] == image_data_happy) {
+          gfx->draw16bitRGBBitmap(0, 0, image_data_happy, 240, 240);
+          delay(1500);
+          play_blink_animation_custom(2, image_data_eye);
+          current_state_index = 0;
+          gfx->draw16bitRGBBitmap(0, 0, image_data_eye, 240, 240);
+        } else {
+          gfx->draw16bitRGBBitmap(0, 0, expression_images[current_state_index], 240, 240);
+        }
+      } else {
+        play_blink_animation();
+        current_state_index = 0;
+        gfx->draw16bitRGBBitmap(0, 0, expression_images[current_state_index], 240, 240);
+      }
+
+      last_activity_time = millis();
+      inactivity_blink_counter = 0;
+      trigger_locked = true;
+    }
+  } else {
+    shake_start_time = 0;
+    trigger_locked = false;
+
+    if (millis() - last_activity_time > INACTIVITY_TIMEOUT_MS) {
+      inactivity_blink_counter++;
+      if (inactivity_blink_counter >= SPEECHLESS_THRESHOLD) {
+        gfx->draw16bitRGBBitmap(0, 0, image_data_speechless, 240, 240);
+      } else {
+        play_blink_animation();
+      }
+      last_activity_time = millis();
+    }
+  }
+}
+
+  delay(100);
+}
+      </code></pre>
+    </section>
+
+    <section class="card">
+      <h2>功能特点</h2>
+      <ul>
+        <li>支持wifi远程控制</li>
+        <li>支持显示屏变更表情，文字</li>
+        <li>可加装多种传感器</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <p>© 2026 cyrene-miniboom</p>
+  </footer>
+
+  <script src="main.js"></script>
+
+  <!-- 代码高亮，可选 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>
+    hljs.highlightAll();
+  </script>
+</body>
+</html>
